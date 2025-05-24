@@ -1,0 +1,13 @@
+pdfplumber
+python-pptx
+pytesseract
+Pillow
+PyMuPDF
+langchain
+tqdm
+sentence-transformers
+chromadb
+transformers
+torch
+numpy
+langchain_community
