@@ -10,7 +10,9 @@ from pptx import Presentation
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # ----------- Section Header Heuristic -----------
-SECTION_HEADER_REGEX = re.compile(r"^\s*(\d{1,2}[\.\)]|[A-Z][\w\s]{1,40}):?\s*$", re.MULTILINE)
+SECTION_HEADER_REGEX = re.compile(
+    r"^(?:(?:[A-Z][\w\s,&/()-]{3,100})|(?:\d+\.\s+[A-Z][\w\s]{3,}))$", re.MULTILINE
+)
 
 def extract_section_title(text: str) -> str:
     lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -30,18 +32,37 @@ def find_section_boundaries(text: str) -> List[Dict[str, str]]:
         sections.append({"title": header, "text": section_text})
     return sections
 
-# ----------- PDF and PPT Extraction -----------
+# ----------- Topic Tagging Logic -----------
+TOPIC_TAGS = {
+    "fees": ["management fee", "expense", "ter", "incentive", "admin"],
+    "liquidity": ["redemption", "liquidity", "lock-up"],
+    "risk": ["risk", "volatility", "default", "loss", "cyber"],
+}
 
+def tag_topic(text: str) -> str:
+    text_lower = text.lower()
+    for tag, keywords in TOPIC_TAGS.items():
+        if any(kw in text_lower for kw in keywords):
+            return tag
+    return "general"
+
+def flatten_table(table: List[List[Any]]) -> str:
+    return "\n".join(
+        [" | ".join(str(cell or "").strip() for cell in row) for row in table if any(cell and str(cell).strip() for cell in row)]
+    )
+
+# ----------- PDF and PPT Extraction -----------
 def extract_pdf_text_by_page(file_path: str, image_output_dir: str = "pdf_images") -> List[Dict[str, Any]]:
     os.makedirs(image_output_dir, exist_ok=True)
     pages = []
 
     with pdfplumber.open(file_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
-            page_data = {"page_number": i, "text": "", "tables": []}
+            page_data = {"page_number": i, "text": "", "tables": [], "is_ocr": False}
             text = page.extract_text()
             if not text or text.strip() == "":
                 text = ocr_pdf_page(file_path, i - 1, image_output_dir)
+                page_data["is_ocr"] = True
             page_data["text"] = text.strip() if text else ""
             tables = page.extract_tables()
             for table in tables:
@@ -71,7 +92,7 @@ def extract_ppt_text_by_slide(file_path: str) -> List[Dict[str, Any]]:
     prs = Presentation(file_path)
     slides = []
     for i, slide in enumerate(prs.slides, start=1):
-        slide_data = {"page_number": i, "text": "", "tables": []}
+        slide_data = {"page_number": i, "text": "", "tables": [], "is_ocr": False}
         text_lines = [f"Slide {i}:"]
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text:
@@ -87,14 +108,13 @@ def extract_ppt_text_by_slide(file_path: str) -> List[Dict[str, Any]]:
     return slides
 
 # ----------- Chunking Logic -----------
-
 def chunk_pages(
     pages: List[Dict[str, Any]],
     fund_name: str,
     source_file: str,
     chunk_size: int = 1000,
     overlap: int = 150,
-    mode: str = "auto"  # "auto" or "character"
+    mode: str = "auto"
 ) -> List[Dict[str, Any]]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
@@ -105,8 +125,14 @@ def chunk_pages(
     chunks = []
     for page in pages:
         raw_text = page["text"]
-        section_chunks = []
+        page_number = page["page_number"]
 
+        # Append tables as text
+        if page["tables"]:
+            table_text = "\n\n".join([flatten_table(t) for t in page["tables"]])
+            raw_text += f"\n\n[TABLE DATA]\n{table_text}"
+
+        section_chunks = []
         if mode == "character":
             text_chunks = splitter.split_text(raw_text)
             for chunk in text_chunks:
@@ -130,27 +156,44 @@ def chunk_pages(
             metadata = {
                 "fund_name": fund_name,
                 "section_title": sec["title"],
-                "page_number": page["page_number"],
+                "page_number": page_number,
                 "source_file": source_file,
                 "prev_section": section_chunks[i - 1]["title"] if i > 0 else "",
-                "next_section": section_chunks[i + 1]["title"] if i < len(section_chunks) - 1 else ""
+                "next_section": section_chunks[i + 1]["title"] if i < len(section_chunks) - 1 else "",
+                "topic": tag_topic(sec["text"]),
+                "is_ocr": page.get("is_ocr", False)
             }
             chunks.append({
                 "text": sec["text"],
                 "metadata": metadata
             })
 
+        # Table-only chunks
+        for table in page["tables"]:
+            flat_text = flatten_table(table)
+            if flat_text.strip():
+                chunks.append({
+                    "text": flat_text,
+                    "metadata": {
+                        "fund_name": fund_name,
+                        "section_title": "TABLE",
+                        "page_number": page_number,
+                        "source_file": source_file,
+                        "topic": tag_topic(flat_text),
+                        "is_ocr": page.get("is_ocr", False)
+                    }
+                })
+
     return chunks
 
 # ----------- Controller Function -----------
-
 def process_files(
     fund_name: str,
     file_paths: List[str],
     image_output_dir: str = "pdf_images",
     chunk_size: int = 1000,
     overlap: int = 150,
-    chunk_mode: str = "auto"  # "character" for fixed chunking
+    chunk_mode: str = "auto"
 ) -> List[Dict[str, Any]]:
     all_chunks = []
     for file_path in file_paths:
