@@ -1,5 +1,3 @@
-# fund_comparator.py
-
 import json
 import requests
 from typing import List, Dict
@@ -13,29 +11,51 @@ def build_prompt(fund_names: List[str], aspect: str) -> str:
 
 def build_single_fund_prompt(fund_name: str, aspect: str) -> str:
     return f"""
-You are a financial assistant AI. Extract the "{aspect}" for the fund "{fund_name}" based on the context provided.
+You are a financial due diligence assistant AI helping an investment advisor review private fund materials.
 
-If the exact investment objective is not directly stated, infer it from related sections such as strategies, investment approach, or fund summary.
+Your task is to extract **precise, well-supported information** related to the following question about the fund "{fund_name}":
 
-Provide a short, precise summary of the objective and cite the document name and page number where applicable.
+➡️ **Question:** {aspect}
+
+📌 Instructions:
+- Use **only the provided context** (below).
+- Be specific and concise (2–4 lines).
+- If the answer is not directly mentioned, try to infer it from related sections such as investment strategy, risk factors, fees, or legal terms.
+- Clearly state **if information is not available**.
+- For every fact, **cite the source document name and page number**, like: _[Investor Guide, p. 5]_.
+
+🎯 Output format:
+1. **Answer**: <your concise answer>
+2. **Citations**: [Document Name, Page #]
+
+Stay factual. Do not fabricate details.
 """
 
 
 def build_multi_fund_prompt(fund_names: List[str], aspect: str) -> str:
     fund_list = "\n".join([f"- {name}" for name in fund_names])
     return f"""
-Compare the following funds on the aspect: "{aspect}":
+You are a financial assistant AI helping an advisor compare multiple funds.
+
+Compare the following funds based on the aspect: **"{aspect}"**:
+
 {fund_list}
 
-Use only the information provided in the context.
-Present the comparison in a table format with the following rows:
-- Entry Load
-- Exit Load
-- Annual Expense Ratio
-- Performance Fee
+📌 Instructions:
+- Use **only the provided context**.
+- If the data is missing for a fund, return "Not available".
+- Return a comparison table. Each row should be one fund, and each column should be:
+  - Value (answer)
+  - Citation (document and page)
 
-Include citations for each value (document name and page/slide number).
-If data is missing for any fund, leave the value blank or indicate "Not available".
+Example:
+
+| Fund Name | Value | Citation |
+|-----------|-------|----------|
+| Fund A    | 2% annual fee | [FundA_PPT, Slide 12] |
+| Fund B    | Not available | — |
+
+Do **not** fabricate any values. Stay factual and grounded in the source.
 """
 
 

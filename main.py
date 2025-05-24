@@ -1,11 +1,12 @@
 import os
+import json
 from embedding.embedder import embed_chunks
 from fund_summarizer import process_files
 from llm.fund_comparator import compare_funds_with_reranked_results
 from rag.vector_store import store_embeddings, hybrid_search
 from reranker.reranker import rerank
 
-# File paths relative to the current script
+# Define your fund and files
 base_path = "documents/BlackRock Private Credit Fund"
 files = [
     os.path.join(base_path, "blk-credit-strategies-fund-investor-guide.pdf"),
@@ -15,6 +16,7 @@ files = [
 
 fund_name = "BlackRock Private Credit Fund"
 
+# Full pipeline
 print("📁 Processing...")
 chunks = process_files(fund_name, files)
 print(f" - Number of chunks processed: {len(chunks)}")
@@ -31,27 +33,71 @@ print("💾 Storing embeddings...")
 store_embeddings(embedded)
 print(" - Embeddings stored successfully.")
 
-aspect = "Investment Objective"
-query = aspect  # Keeping it aligned
+# Questions to be answered
+fund_questions = [
+    "What is the fund's investment objective?",
+    "What is the underlying investment strategy?",
+    "How does the fund differentiate itself from its competitors?",
+    "What is the benchmark used for performance comparison?",
+    "What is the legal structure of the fund?",
+    "What are the key risk factors associated with this fund?",
+    "What is the fund's liquidity profile?",
+    "What is the minimum investment required?",
+    "What is the total expense ratio (TER) or management fee structure?",
+    "Are there any performance based fees?",
+    "Are there any hidden costs, such as trading or administrative fees?",
+    "What are the expected returns based on historical data or backtracking?",
+    "How does the fund perform in different market conditions?",
+    "What is the expected volatility and drawdown potential?",
+    "What are the redemption terms, including lock in period and withdrawal fees?",
+    "Is there an option for early withdrawal, and what are the underlying conditions?",
+    "How are proceeds distributed in case of fund liquidation?"
+]
 
-print(f"\n🔍 Searching for: {query}")
-results = hybrid_search(query, fund_filter=fund_name)
-print(f" - Number of search results: {len(results)}")
+results = []
 
-print("🔁 Reranking search results...")
-top = rerank(query, results)
-print(f" - Number of top reranked chunks: {len(top)}")
+for question in fund_questions:
+    print(f"\n🔍 Searching for: {question}")
+    search_results = hybrid_search(question, fund_filter=fund_name)
+    print(f" - Found {len(search_results)} results.")
 
-funds = [fund_name]
+    if not search_results:
+        print("⚠️  No chunks found for this question.")
+        results.append({
+            "question": question,
+            "answer": "No relevant information found in the provided documents.",
+            "sources": []
+        })
+        continue
 
-print(f"\n📊 LLM Comparison on aspect: {aspect}")
-comparison = compare_funds_with_reranked_results(fund_names=funds, aspect=aspect, top_chunks=top)
+    print("🔁 Reranking...")
+    top_chunks = rerank(question, search_results)
+    print(f" - Top {len(top_chunks)} chunks selected.")
 
-print("\n✅ Answer:")
-print(comparison.get("answer", "No answer returned."))
+    print(f"📊 LLM answering: {question}")
+    response = compare_funds_with_reranked_results(
+        fund_names=[fund_name],
+        aspect=question,
+        top_chunks=top_chunks
+    )
 
-print("\n📚 Sources:")
-for s in comparison.get("sources", []):
-    print(f"- {s['source_file']} (Page {s['page_number']}) | Score: {s['score']:.4f}")
-    print(f"  {s['text_excerpt']}...\n")
+    print("\n✅ Answer:")
+    print(response.get("answer", "No answer returned."))
 
+    print("\n📚 Sources:")
+    for s in response.get("sources", []):
+        print(f"- {s['source_file']} (Page {s['page_number']}) | Score: {s['score']:.4f}")
+        print(f"  {s['text_excerpt']}...\n")
+
+    results.append({
+        "question": question,
+        "answer": response["answer"],
+        "sources": response["sources"]
+    })
+
+# Save all results to JSON
+output_file = f"{fund_name.replace(' ', '_').lower()}_qa_summary.json"
+with open(output_file, "w") as f:
+    json.dump(results, f, indent=2)
+
+print(f"\n📁 All results saved to: {output_file}")
