@@ -3,8 +3,7 @@ import json
 from embedding.embedder import embed_chunks
 from fund_summarizer import process_files
 from llm.fund_comparator import compare_funds_with_reranked_results
-from rag.vector_store import store_embeddings, hybrid_search
-from reranker.reranker import rerank
+from rag.vector_store import store_embeddings, search_with_rerank
 
 # Define your fund and files
 base_path = "documents/BlackRock Private Credit Fund"
@@ -57,11 +56,11 @@ fund_questions = [
 results = []
 
 for question in fund_questions:
-    print(f"\n🔍 Searching for: {question}")
-    search_results = hybrid_search(question, fund_filter=fund_name)
-    print(f" - Found {len(search_results)} results.")
+    print(f"\n🔍 Searching and reranking for: {question}")
+    top_chunks = search_with_rerank(query=question, fund_filter=fund_name)
+    print(f" - Top {len(top_chunks)} chunks selected.")
 
-    if not search_results:
+    if not top_chunks:
         print("⚠️  No chunks found for this question.")
         results.append({
             "question": question,
@@ -69,10 +68,6 @@ for question in fund_questions:
             "sources": []
         })
         continue
-
-    print("🔁 Reranking...")
-    top_chunks = rerank(question, search_results)
-    print(f" - Top {len(top_chunks)} chunks selected.")
 
     print(f"📊 LLM answering: {question}")
     response = compare_funds_with_reranked_results(
@@ -96,7 +91,7 @@ for question in fund_questions:
     })
 
 # Save all results to JSON
-output_file = f"{fund_name.replace(' ', '_').lower()}_qa_summary.json"
+output_file = f"{fund_name.replace(' ', '_').lower()}_qa_summary2.json"
 with open(output_file, "w") as f:
     json.dump(results, f, indent=2)
 

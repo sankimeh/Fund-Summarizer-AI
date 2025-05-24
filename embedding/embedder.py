@@ -1,7 +1,7 @@
 from sentence_transformers import SentenceTransformer
 
 print("🔄 Loading BGE embedding model...")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = SentenceTransformer("BAAI/bge-base-en-v1.5")  # 1024-dim embeddings
 
 def embed_chunks(chunks):
     texts = [chunk["text"] for chunk in chunks]
