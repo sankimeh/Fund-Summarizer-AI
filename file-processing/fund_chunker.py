@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 from typing import List, Dict, Any
 
 import fitz  # PyMuPDF
@@ -11,7 +12,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # ----------- Section Header Heuristic -----------
 SECTION_HEADER_REGEX = re.compile(
-    r"^(?:(?:[A-Z][\w\s,&/()-]{3,100})|(?:\d+\.\s+[A-Z][\w\s]{3,}))$", re.MULTILINE
+    r"^(?:\d+(?:\.\d+)*\.?\s+)?[A-Z][\w\s,&/()-]{3,}$", re.MULTILINE
 )
 
 def extract_section_title(text: str) -> str:
@@ -35,21 +36,30 @@ def find_section_boundaries(text: str) -> List[Dict[str, str]]:
 # ----------- Topic Tagging Logic -----------
 TOPIC_TAGS = {
     "fees": ["management fee", "expense", "ter", "incentive", "admin"],
-    "liquidity": ["redemption", "liquidity", "lock-up"],
+    "liquidity": ["redemption", "liquidity", "lock-up", "withdrawal", "notice period"],
     "risk": ["risk", "volatility", "default", "loss", "cyber"],
+    "performance": ["irr", "return", "yield", "benchmark"],
+    "structure": ["lp", "llc", "trust", "legal structure"],
+    "strategy": ["investment strategy", "asset allocation", "portfolio"],
+    "redemption_terms": ["redemption", "notice", "lock-in", "exit window"]
 }
 
-def tag_topic(text: str) -> str:
-    text_lower = text.lower()
+def get_financial_tags(text: str) -> List[str]:
+    text = text.lower()
+    tags = []
     for tag, keywords in TOPIC_TAGS.items():
-        if any(kw in text_lower for kw in keywords):
-            return tag
-    return "general"
+        if any(kw in text for kw in keywords):
+            tags.append(tag)
+    return tags or ["general"]
 
 def flatten_table(table: List[List[Any]]) -> str:
     return "\n".join(
         [" | ".join(str(cell or "").strip() for cell in row) for row in table if any(cell and str(cell).strip() for cell in row)]
     )
+
+def chunk_large_table(table, max_lines=20):
+    for i in range(0, len(table), max_lines):
+        yield table[i:i + max_lines]
 
 # ----------- PDF and PPT Extraction -----------
 def extract_pdf_text_by_page(file_path: str, image_output_dir: str = "pdf_images") -> List[Dict[str, Any]]:
@@ -60,7 +70,7 @@ def extract_pdf_text_by_page(file_path: str, image_output_dir: str = "pdf_images
         for i, page in enumerate(pdf.pages, start=1):
             page_data = {"page_number": i, "text": "", "tables": [], "is_ocr": False}
             text = page.extract_text()
-            if not text or text.strip() == "":
+            if not text or len(text.splitlines()) < 3:
                 text = ocr_pdf_page(file_path, i - 1, image_output_dir)
                 page_data["is_ocr"] = True
             page_data["text"] = text.strip() if text else ""
@@ -70,7 +80,31 @@ def extract_pdf_text_by_page(file_path: str, image_output_dir: str = "pdf_images
                     page_data["tables"].append(table)
             save_pdf_page_as_image(file_path, i - 1, os.path.join(image_output_dir, f"{os.path.basename(file_path)}_page_{i}.png"))
             pages.append(page_data)
+
+    pages = detect_and_merge_multi_page_tables(pages)
     return pages
+
+def detect_and_merge_multi_page_tables(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for i in range(len(pages) - 1):
+        current_tables = pages[i]["tables"]
+        next_tables = pages[i + 1]["tables"]
+        if current_tables and next_tables:
+            last_table = current_tables[-1]
+            first_next_table = next_tables[0]
+            if is_probable_continuation(last_table, first_next_table):
+                merged = last_table + first_next_table
+                pages[i]["tables"][-1] = merged
+                del pages[i + 1]["tables"][0]
+    return pages
+
+def is_probable_continuation(last_table: List[List[str]], next_table: List[List[str]]) -> bool:
+    if not last_table or not next_table:
+        return False
+    header_keywords = {"date", "amount", "description", "investment"}
+    row = " ".join(str(cell or "") for cell in next_table[0]).lower()
+    if any(kw in row for kw in header_keywords):
+        return False
+    return len(last_table) > 2 and len(next_table) > 2
 
 def ocr_pdf_page(file_path: str, page_index: int, image_output_dir: str) -> str:
     with fitz.open(file_path) as doc:
@@ -126,11 +160,15 @@ def chunk_pages(
     for page in pages:
         raw_text = page["text"]
         page_number = page["page_number"]
+        has_table = bool(page["tables"])
 
-        # Append tables as text
-        if page["tables"]:
-            table_text = "\n\n".join([flatten_table(t) for t in page["tables"]])
-            raw_text += f"\n\n[TABLE DATA]\n{table_text}"
+        # Append tables text as chunks too
+        if has_table:
+            for table in page["tables"]:
+                # chunk_large_table yields smaller slices of table rows
+                for table_chunk in chunk_large_table(table):
+                    table_text = flatten_table(table_chunk)
+                    raw_text += f"\n\n[TABLE DATA]\n{table_text}"
 
         section_chunks = []
         if mode == "character":
@@ -153,6 +191,7 @@ def chunk_pages(
                 section_chunks = found_sections
 
         for i, sec in enumerate(section_chunks):
+            section_text = sec["text"]
             metadata = {
                 "fund_name": fund_name,
                 "section_title": sec["title"],
@@ -160,29 +199,16 @@ def chunk_pages(
                 "source_file": source_file,
                 "prev_section": section_chunks[i - 1]["title"] if i > 0 else "",
                 "next_section": section_chunks[i + 1]["title"] if i < len(section_chunks) - 1 else "",
-                "topic": tag_topic(sec["text"]),
-                "is_ocr": page.get("is_ocr", False)
+                "chunk_index": i,
+                "financial_tags": ", ".join(get_financial_tags(section_text)),  # <-- HERE
+                "is_ocr": page.get("is_ocr", False),
+                "has_table": has_table,
+                "source_checksum": hashlib.md5(section_text.encode("utf-8")).hexdigest()[:10]
             }
             chunks.append({
-                "text": sec["text"],
+                "text": section_text,
                 "metadata": metadata
             })
-
-        # Table-only chunks
-        for table in page["tables"]:
-            flat_text = flatten_table(table)
-            if flat_text.strip():
-                chunks.append({
-                    "text": flat_text,
-                    "metadata": {
-                        "fund_name": fund_name,
-                        "section_title": "TABLE",
-                        "page_number": page_number,
-                        "source_file": source_file,
-                        "topic": tag_topic(flat_text),
-                        "is_ocr": page.get("is_ocr", False)
-                    }
-                })
 
     return chunks
 
